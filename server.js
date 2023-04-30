@@ -4,7 +4,7 @@ const app = express();
 const handlebars = require("express-handlebars");
 const bodyParser = require("body-parser");
 const clientSessions = require("client-sessions");
-const libData = require("./libData");
+const gymData = require("./gymData.js");
 
 app.engine(
   ".hbs",
@@ -13,22 +13,18 @@ app.engine(
     defaultLayout: "main",
   })
 );
-
-
-app.set("view engine", ".hbs");
+app.set("view engine", "hbs");
 app.use(bodyParser.urlencoded({ extended: false }));
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static("public"));
 
 app.use(
   clientSessions({
     cookieName: "session",
-    secret: "iw3ouroiwehro2342kldsjfdsfafdskjkwbkcvhdsf",
+    secret: "iw3ouroiwehro2342kldsjfkjkwbkcvhdsf",
     duration: 2 * 60 * 1000,
     activeDuration: 1000 * 60,
   })
 );
-
-
 app.use((req, res, next) => {
   res.locals.session = req.session;
   next();
@@ -36,85 +32,176 @@ app.use((req, res, next) => {
 
 let ensureLogin = (req, res, next) => {
   if (!req.session.user) {
-    res.render("error", { message: "You must be logged in to view this page" });
+    res.redirect("/login");
   } else {
     next();
   }
 };
-
-
-app.get("/", (req, res) => {
-  libData.getAllBooks().then((books) => {
-    res.render("home", { data: books });
+app.get("/", async (req, res) => {
+  let classes = await gymData.getClasses();
+  res.render("sched", {
+    schedule: { isActive: true },
+    title: "Home",
+    data: classes,
   });
 });
 
-
-app.get("/profile", ensureLogin, (req, res) => {
-  libData
-    .getBooksByUser(req.session.user.cardnumber)
-    .then((books) => {
-      res.render("profile", { data: books });
-    })
-    .catch((err) => {
-      res.render("error", { message: "Some error occured" });
+app.get("/cart", ensureLogin, async (req, res) => {
+  let cartDetails = await gymData.getCartDetails(req.session.user.username);
+  if (cartDetails.length == 0) {
+    res.render("cart", {
+      cart: { isActive: true },
+      title: "Cart",
+      errMsg: "No classes in cart",
     });
-});
-
-
-app.post("/borrow", ensureLogin, (req, res) => {
-  req.body.borrowedBy = req.session.user.cardnumber;
-  libData
-    .borrowBook(req.body)
-    .then(() => {
-      res.redirect("/");
-    })
-    .catch((err) => {
-      res.render("error", { message: "Some error occured" });
-    });
-});
-
-
-app.post("/return", ensureLogin, (req, res) => {
-  req.body.borrowedBy = req.session.user.cardnumber;
-  libData
-    .returnBook(req.body)
-    .then(() => {
-      res.redirect("/profile");
-    })
-    .catch((err) => {
-      res.render("error", { message: "Some error occured" });
-    });
-});
-
-
-app.get("/login", (req, res) => {
-  res.render("login");
-});
-
-
-app.post("/login", async (req, res) => {
-  try {
-    let user = await libData.checkUser(req.body);
-    if (user) {
-      req.session.user = {
-        cardnumber: user.cardnumber,
-      };
-      res.redirect("/profile");
+    return;
+  } else {
+    let subTotal = cartDetails.length * 25;
+    let tax = subTotal * 0.13;
+    let total = subTotal + tax;
+    let checkMonthly;
+    try {
+      checkMonthly = await gymData.checkMonthly(req.session.user.username);
+    } catch (e) {
+      console.log(e);
     }
-  } catch (err) {
-    res.render("error", { message: "Invalid login" });
+    if (checkMonthly) {
+      subTotal = 0;
+      tax = 0;
+      total = 0;
+    }
+    res.render("cart", {
+      cart: { isActive: true },
+      title: "Cart",
+      data: cartDetails,
+      subTotal: subTotal,
+      tax: tax,
+      total: total,
+    });
   }
 });
 
+app.post("/book", ensureLogin, async (req, res) => {
+  let body = req.body;
+  body.username = req.session.user.username;
+  try {
+    await gymData.bookClass(body);
+  } catch (e) {
+    console.log(e);
+  }
 
-app.get("/logout", (req, res) => {
+  res.redirect("/");
+});
+app.post("/remove", ensureLogin, async (req, res) => {
+  let body = req.body;
+  body.username = req.session.user.username;
+  try {
+    await gymData.removeCart(body);
+  } catch (e) {
+    console.log(e);
+  }
+  res.redirect("/cart");
+});
+app.post("/joinmonthly", ensureLogin, async (req, res) => {
+  let body = req.body;
+  if (body.join === "Cancel") {
+    res.redirect("/cart");
+    return;
+  } else {
+    body.classid = "Monthly Member";
+    body.username = req.session.user.username;
+    body.total = 75;
+    try {
+      await gymData.bookClass(body);
+      await gymData.addPayment(body);
+    } catch (e) {
+      console.log(e);
+    }
+    res.redirect("/cart");
+  }
+});
+
+app.post("/payclass", ensureLogin, async (req, res) => {
+  let body = req.body;
+  body.username = req.session.user.username;
+  body.total = await gymData.getCartTotal(body.username);
+  let checkMonthly;
+  try {
+    checkMonthly = await gymData.checkMonthly(req.session.user.username);
+  } catch (e) {
+    console.log(e);
+  }
+  if (checkMonthly) {
+    await gymData.clearCart(body.username);
+    res.redirect("/cart");
+    return;
+  } else {
+    try {
+      await gymData.addPayment(body);
+    } catch (e) {
+      console.log(e);
+    }
+    res.redirect("/cart");
+  }
+});
+
+app.get("/login", async (req, res) => {
+  res.render("login", { login: { isActive: true }, title: "Login" });
+});
+app.post("/login", async (req, res) => {
+  let body = req.body;
+  let type = body.type;
+  if (type == "login") {
+    await gymData
+      .checkCredentials(body)
+      .then(() => {
+        req.session.user = {
+          username: body.username,
+        };
+        res.redirect("/");
+      })
+      .catch((e) => {
+        console.log(e);
+      });
+  }
+  if (type == "signup") {
+    await gymData
+      .addUser(body)
+      .then(() => {
+        req.session.user = {
+          username: body.username,
+        };
+        res.render("joinmonthly", { title: "Join Monthly" });
+      })
+      .catch((e) => {
+        console.log(e);
+      });
+  }
+});
+app.get("/logout", async (req, res) => {
   req.session.reset();
   res.redirect("/");
 });
+app.get("/payments", ensureLogin, async (req, res) => {
+  try {
+    let payments = await gymData.getAllPayments(req.session.user.username);
+    res.send(payments);
+  } catch (e) {
+    console.log(e);
+    res.sendStatus(404);
+  }
+});
+app.get("/joinmonthly",(req,res)=>{
+  res.render("joinmonthly",{title:"Join Monthly"})
+}
+)
 
-libData.init().then(() => {
+app.use("*", (req, res) => {
+  res.sendStatus(404);
+});
+
+gymData.init().then(() => {
   app.listen(3000, () => {
-    console.log("Server listening at port 3000");
+    console.log("Server started on port 3000");
   });
 });
